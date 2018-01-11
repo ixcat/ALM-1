@@ -6,6 +6,7 @@ import re
 from decimal import Decimal
 
 from datetime import datetime, timedelta
+from code import interact
 
 import datajoint as dj
 
@@ -72,14 +73,14 @@ class Study(dj.Manual):
             'lab': g_gen['lab'][()].decode(),
             'reference_atlas': g_gen['reference_atlas'][()].decode()
         }
-        self.insert1(dct)
+        self.insert1(dct, skip_duplicates=True)
 
         for n in g_gen['notes'][()].decode().split(','):
             dct['keyword'] = n
-            StudyKeyword().insert1(dct, ignore_extra_fields=True)
+            StudyKeyword().insert1(dct, ignore_extra_fields=True, skip_duplicates=True)
 
         dct['doi'] = g_gen['related_publications'][()].decode()
-        Publication().insert1(dct, ignore_extra_fields=True)
+        Publication().insert1(dct, ignore_extra_fields=True, skip_duplicates=True)
 
 
 @schema
@@ -689,20 +690,23 @@ class Acquisition(dj.Computed):
             cuestamps = g_pres['auditory_cue']['timestamps']
             cuedat = g_pres['auditory_cue']['data']
 
-            ipoletamps = g_pres['pole_in']['timestamps']
+            ipolestamps = g_pres['pole_in']['timestamps']
             opolestamps = g_pres['pole_out']['timestamps']
 
             key['auditory_timestamp'] = Decimal(float(cuestamps[tidx]))
             key['auditory_cue'] = cuedat[tidx]
-            key['pole_in_timestamp'] = ipoletamps[tidx]
+            key['pole_in_timestamp'] = ipolestamps[tidx]
             key['pole_out_timestamp'] = opolestamps[tidx]
+
+            # np.isnan(key['pole_in_timestamp'])
+
             try:
                 self.StimulusPresentation().insert1(
                     key, ignore_extra_fields=True)
             except IntegrityError:  # TODO: handle NaN in timestamps
                 print('.StimulusPresentation error (NaN?):',
-                      'session', key['session'],
-                      'trial:', key['trial'])
+                    'key', key)
+                interact('muherr', local=locals())
 
         f.close()
 
