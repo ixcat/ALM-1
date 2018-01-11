@@ -3,17 +3,15 @@
 import os
 
 import re
+
 from decimal import Decimal
-
 from datetime import datetime, timedelta
-from code import interact
 
+import h5py
+import numpy as np
 import datajoint as dj
 
 from nwb import nwb_file
-
-import h5py
-
 from pymysql.err import IntegrityError
 
 dj.config['database.host'] = 'localhost'
@@ -633,80 +631,71 @@ class Acquisition(dj.Computed):
         """
 
     def _make_tuples(self, key):
+        print('Acquisition().make()', key)
 
         key['nwb_file'] = (Session() & key).fetch1()['nwb_file']
         print('Acquisition()._make_tuples: nwb_file', key['nwb_file'])
         f = h5py.File(key['nwb_file'], 'r')
 
         g_acq = f['acquisition']
+        g_epochs = f['epochs']
+        g_pres = f['stimulus']['presentation']
+        g_ts = g_acq['timeseries']
+
         self.insert1(key, ignore_extra_fields=True)
 
+        #
         # Acquisition.LickTrace
-        key['lick_trace'] = g_acq['timeseries']['lick_trace']['data'].value
-        key['timestamps'] = g_acq['timeseries']['lick_trace']['timestamps'].value
+        #
 
+        key['lick_trace'] = g_ts['lick_trace']['data'].value
+        key['timestamps'] = g_ts['lick_trace']['timestamps'].value
         self.LickTrace().insert1(key, ignore_extra_fields=True)
 
+        #
         # Acquisition.Trial
-        '''
-        alternately:
-        load TrialType, UnitInTrial, StimulusPresentation
-        in single top-level trial iteration
-        '''
-        g_epochs = f['epochs']
-        g_analysis = f['analysis']
-        g_pres = f['stimulus']['presentation']
+        #
 
-        for tkey in [k for k in g_epochs if 'trial_' in k]:
+        tstrs = (k for k in g_epochs if 'trial_' in k)
+        tnums = (int(t.split('_')[1]) - 1 for t in tstrs)  # -1: off-by-1
 
-            # Acquisition.Trial
-            tno = int(tkey.split('_')[1])
-            tidx = tno - 1  # for off-by-one
-            key['trial'] = tkey.split('_')[1]
-            key['start_time'] = g_epochs[tkey]['start_time'][()]
-            key['stop_time'] = g_epochs[tkey]['stop_time'][()]
-            self.Trial().insert1(key, ignore_extra_fields=True)
+        trials = (dict(key, trial=t, start_time=g_epochs[ts]['start_time'][()],
+                       stop_time=g_epochs[ts]['stop_time'][()])
+                  for t, ts in zip(tnums, tstrs))
 
-            # Acquisition.UnitInTrial
-            d_units = g_epochs[tkey]['units_present']
-            key['spike_sort_method'] = 'default'
-            if d_units[(0,)].decode() != 'NA':  # XXX: assuming convention
-                for u in d_units:
-                    key['unit'] = u.decode().split('_')[1]
-                    self.UnitInTrial().insert1(key, ignore_extra_fields=True)
+        self.Trial().insert(trials, ignore_extra_fields=True)
 
-            # Acquisition.TrialType
-            # XXX: ignoring trial_start_times yet doesn't match epoch start
-            # trial_start_times *seems* like unrounded epoch[n]['start_time']?
+        #
+        # Aquisition.UnitInTrial
+        #
 
-            ttmat = g_analysis['trial_type_mat']
-            ttstr = g_analysis['trial_type_string']
-            for i in range(len(ttmat)):  # 8 trial types
-                if ttmat[i][tidx]:
-                    key['trial_type'] = ttstr[i].decode()
-                    self.TrialType().insert1(key, ignore_extra_fields=True)
+        units = (g_epochs[ts]['units_present'] for ts in tstrs)
+        self.UnitInTrial().insert((
+            dict(t, unit=u.decode().split('_')[1])
+            for t, u in zip(trials, units)
+            if u[(0,)].decode() != 'NA'),
+            ignore_extra_fields=True)
 
-            # Acquisition.StimulusPresentation
-            cuestamps = g_pres['auditory_cue']['timestamps']
-            cuedat = g_pres['auditory_cue']['data']
+        #
+        # Acquisition.StimulusPresentation
+        #
 
-            ipolestamps = g_pres['pole_in']['timestamps']
-            opolestamps = g_pres['pole_out']['timestamps']
+        print('Acquisition.StimulusPresentation()')
 
-            key['auditory_timestamp'] = Decimal(float(cuestamps[tidx]))
-            key['auditory_cue'] = cuedat[tidx]
-            key['pole_in_timestamp'] = ipolestamps[tidx]
-            key['pole_out_timestamp'] = opolestamps[tidx]
+        cuestamps = g_pres['auditory_cue']['timestamps']
+        cuedat = g_pres['auditory_cue']['data']
 
-            # np.isnan(key['pole_in_timestamp'])
+        ipolestamps = g_pres['pole_in']['timestamps']
+        opolestamps = g_pres['pole_out']['timestamps']
 
-            try:
-                self.StimulusPresentation().insert1(
-                    key, ignore_extra_fields=True)
-            except IntegrityError:  # TODO: handle NaN in timestamps
-                print('.StimulusPresentation error (NaN?):',
-                    'key', key)
-                interact('muherr', local=locals())
+        self.StimulusPresentation().insert(
+            dict(t, auditory_timestamp=Decimal(float(cuestamps[i])),
+                 auditory_cue=cuedat[i],
+                 pole_in_timestamp=ipolestamps[i],
+                 pole_out_timestamp=opolestamps[i])
+            for t, i in zip(trials, tnums)
+            if not all((np.isnan(cuedat[i]), np.isnan(ipolestamps[i]),
+                        np.isnan(opolestamps[i]))))
 
         f.close()
 
